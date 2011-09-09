@@ -17,6 +17,8 @@ module Mongoid::History
       Mongoid::History.tracker_class_name = self.name.tableize.singularize.to_sym
     end
 
+    ##
+    # PH: I recommend this be limited to used only when the action is :destroy (when restoring a removed object)
     def undo!(modifier)
       if action.to_sym == :destroy
         class_name = association_chain[0]["name"]
@@ -27,6 +29,8 @@ module Mongoid::History
       end
     end
 
+    ##
+    # PH: I recommend this be limited to used only when the action is :destroy (when removing an object)
     def redo!(modifier)
       if action.to_sym == :destroy
         trackable.destroy
@@ -38,9 +42,22 @@ module Mongoid::History
     def undo_attr(modifier)
       undo_hash = affected.easy_unmerge(modified)
       undo_hash.easy_merge!(original)
+      # Note: easy_merge!() choses nil only if the key doesn't exist in the called hash
+      undo_hash.merge!(undo_remove_attr(modifier))
       modifier_field = trackable.history_trackable_options[:modifier_field]
       undo_hash[modifier_field] = modifier
       undo_hash
+    end
+    
+    ##
+    # Attributes that need to be removed as part of the "undo"
+    def undo_remove_attr(modifier)
+      remove_attribute_keys = (modified.keys - original.keys)
+      undo_remove_hash = {}
+      remove_attribute_keys.each do |attr_key|
+        undo_remove_hash.easy_merge! attr_key => nil
+      end
+      undo_remove_hash
     end
 
     def redo_attr(modifier)

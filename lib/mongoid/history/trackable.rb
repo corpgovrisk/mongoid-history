@@ -80,6 +80,11 @@ module Mongoid::History
       #  undo 4
       #  undo :last => 10
       def undo!(modifier, options_or_version=nil)
+        _undo(modifier, options_or_version)
+        save!
+      end
+
+      def _undo(modifier, options_or_version=nil)
         versions = get_versions_criteria(options_or_version).to_a
         versions.sort!{|v1, v2| v2.version <=> v1.version}
 
@@ -87,10 +92,14 @@ module Mongoid::History
           undo_attr = v.undo_attr(modifier)
           self.attributes = v.undo_attr(modifier)
         end
+      end
+      
+      def redo!(modifier, options_or_version=nil)
+        _redo(modifier, options_or_version)
         save!
       end
 
-      def redo!(modifier, options_or_version=nil)
+      def _redo(modifier, options_or_version=nil)
         versions = get_versions_criteria(options_or_version).to_a
         versions.sort!{|v1, v2| v1.version <=> v2.version}
 
@@ -98,9 +107,8 @@ module Mongoid::History
           redo_attr = v.redo_attr(modifier)
           self.attributes = redo_attr
         end
-        save!
       end
-
+      
     private
       def get_versions_criteria(options_or_version)
         if options_or_version.is_a? Hash
