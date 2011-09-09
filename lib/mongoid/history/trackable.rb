@@ -135,7 +135,7 @@ module Mongoid::History
       end
 
       def modified_attributes_for_update
-        @modified_attributes_for_update ||= if history_trackable_options[:on] == :all
+        if history_trackable_options[:on] == :all
           changes.reject do |k, v|
             history_trackable_options[:except].include?(k)
           end
@@ -148,7 +148,7 @@ module Mongoid::History
       end
 
       def modified_attributes_for_create
-        @modified_attributes_for_create ||= attributes.inject({}) do |h, pair|
+        attributes.inject({}) do |h, pair|
           k,v =  pair
           h[k] = [nil, v]
           h
@@ -158,7 +158,7 @@ module Mongoid::History
       end
 
       def modified_attributes_for_destroy
-        @modified_attributes_for_destroy ||= attributes.inject({}) do |h, pair|
+        attributes.inject({}) do |h, pair|
           k,v =  pair
           h[k] = [nil, v]
           h
