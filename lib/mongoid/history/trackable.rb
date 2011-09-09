@@ -218,8 +218,10 @@ module Mongoid::History
 
       def clear_memoization
         @history_tracker_attributes =  nil
-        @modified_attributes_for_create = nil
-        @modified_attributes_for_update = nil
+        #:ToDo: Find a way to make this work reliably
+        #@modified_attributes_for_create = nil
+        #@modified_attributes_for_update = nil
+        #@modified_attributes_for_destroy = nil
         @history_tracks = nil
       end
 
