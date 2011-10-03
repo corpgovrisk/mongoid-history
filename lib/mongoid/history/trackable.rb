@@ -90,7 +90,7 @@ module Mongoid::History
 
         versions.each do |v|
           undo_attr = v.undo_attr(modifier)
-          self.attributes = v.undo_attr(modifier)
+          self.write_attributes(v.undo_attr(modifier), false) # guard_protected_attributes = false
         end
       end
       
@@ -105,10 +105,12 @@ module Mongoid::History
 
         versions.each do |v|
           redo_attr = v.redo_attr(modifier)
-          self.attributes = redo_attr
+          self.write_attributes(redo_attr, false) # guard_protected_attributes = false
         end
       end
-      
+    
+    ##
+    # PRIVATE
     private
       def get_versions_criteria(options_or_version)
         if options_or_version.is_a? Hash
@@ -178,9 +180,17 @@ module Mongoid::History
 
         @history_tracker_attributes = {
           :association_chain  => traverse_association_chain,
+          :doc_hash           => self.as_document,
+          :doc_name           => self.class.name,
+          :is_embedded        => embedded?,
           :scope              => history_trackable_options[:scope],
-          :modifier        => send(history_trackable_options[:modifier_field])
+          :modifier           => send(history_trackable_options[:modifier_field])
         }
+        
+        if embedded?
+          @history_tracker_attributes[:root_hash] = _root.as_document
+          @history_tracker_attributes[:root_name] = _root.class.name
+        end
 
         original, modified = transform_changes(case method
           when :destroy then modified_attributes_for_destroy

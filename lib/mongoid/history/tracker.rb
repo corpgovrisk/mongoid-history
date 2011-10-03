@@ -6,38 +6,43 @@ module Mongoid::History
       include Mongoid::Document
       include Mongoid::Timestamps
 
-      field       :association_chain,       :type => Array,     :default => []
-      field       :modified,                :type => Hash
-      field       :original,                :type => Hash
-      field       :version,                 :type => Integer
-      field       :action,                  :type => String
-      field       :scope,                   :type => String
-      referenced_in :modifier,              :class_name => Mongoid::History.modifier_class_name
+      field           :association_chain,   :type => Array,     :default => []
+      field           :modified,            :type => Hash
+      field           :original,            :type => Hash
+      field           :doc_hash,            :type => Hash
+      field           :doc_name,            :type => String
+      field           :is_embedded,         :type => Boolean
+      field           :root_hash,           :type => Hash       # Optional
+      field           :root_name,           :type => String     # Optional
+      field           :version,             :type => Integer
+      field           :action,              :type => String
+      field           :scope,               :type => String
+      referenced_in   :modifier,            :class_name => Mongoid::History.modifier_class_name
 
       Mongoid::History.tracker_class_name = self.name.tableize.singularize.to_sym
     end
 
-    ##
-    # PH: I recommend this be limited to used only when the action is :destroy (when restoring a removed object)
-    def undo!(modifier)
-      if action.to_sym == :destroy
-        class_name = association_chain[0]["name"]
-        restored = class_name.constantize.new(modified)
-        restored.save!
-      else
-        trackable.update_attributes!(undo_attr(modifier))
-      end
-    end
+    # ##
+    # # PH: I recommend this be limited to only when the action is :destroy (when restoring a removed object)
+    # def undo!(modifier)
+    #   if action.to_sym == :destroy
+    #     class_name = association_chain[0]["name"]
+    #     restored = class_name.constantize.new(modified)
+    #     restored.save!
+    #   else
+    #     trackable.update_attributes!(undo_attr(modifier), :without_protection => true)
+    #   end
+    # end
 
-    ##
-    # PH: I recommend this be limited to used only when the action is :destroy (when removing an object)
-    def redo!(modifier)
-      if action.to_sym == :destroy
-        trackable.destroy
-      else
-        trackable.update_attributes!(redo_attr(modifier))
-      end
-    end
+    # ##
+    # # PH: I recommend this be limited to only when the action is :destroy (when removing an object)
+    # def redo!(modifier)
+    #   if action.to_sym == :destroy
+    #     trackable.destroy
+    #   else
+    #     trackable.update_attributes!(redo_attr(modifier), :without_protection => true)
+    #   end
+    # end
 
     def undo_attr(modifier)
       undo_hash = affected.easy_unmerge(modified)
@@ -72,10 +77,29 @@ module Mongoid::History
       @trackable_root ||= trackable_parents_and_trackable.first
     end
 
+    ##
+    # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
+    def trackable_root_from_hash
+      return unless root_name && root_hash
+      @trackable_root_from_hash ||= 
+        root_name.classify.constantize.new().tap { |ob| ob.write_attributes(root_hash, false); } rescue nil
+    end
+    
     def trackable
+      if (action == 'destroy') 
+        @trackable ||= association_chain.last['name'].classify.constantize.new(modified)
+      end
       @trackable ||= trackable_parents_and_trackable.last
     end
 
+    ##
+    # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
+    def trackable_from_hash
+      return unless doc_name && doc_hash
+      @trackable_from_hash ||= 
+        doc_name.classify.constantize.new().tap { |ob| ob.write_attributes(doc_hash, false); } rescue nil
+    end
+    
     def trackable_parents
       @trackable_parents ||= trackable_parents_and_trackable[0, -1]
     end
@@ -85,24 +109,24 @@ module Mongoid::History
         trackable ? trackable.attributes[k] : modified[k]; h}
     end
 
-private
-    def trackable_parents_and_trackable
-      @trackable_parents_and_trackable ||= traverse_association_chain
-    end
-
-    def traverse_association_chain
-      chain = association_chain.dup
-      doc = nil
-      documents = []
-      begin
-        node = chain.shift
-        name = node['name']
-        col  = doc.nil? ? name.classify.constantize : doc.send(name.tableize)
-        doc  = col.where(:_id => node['id']).first
-        documents << doc
-      end while( !chain.empty? )
-      documents
-    end
+    private
+      def trackable_parents_and_trackable
+        @trackable_parents_and_trackable ||= traverse_association_chain
+      end
+      
+      def traverse_association_chain
+        chain = association_chain.dup
+        doc = nil
+        documents = []
+        begin
+          node = chain.shift
+          name = node['name']
+          col  = doc.nil? ? name.classify.constantize : doc.send(name.tableize)
+          doc  = col.where(:_id => node['id']).first
+          documents << doc
+        end while( !chain.empty? )
+        documents
+      end
 
   end
 end
