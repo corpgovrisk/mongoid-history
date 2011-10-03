@@ -225,16 +225,18 @@ module Mongoid::History
         @history_tracks = nil
       end
 
+      ##
+      # This function now honours nil values
       def transform_changes(changes)
         original = {}
         modified = {}
         changes.each_pair do |k, v|
           o, m = v
-          original[k] = o if o
-          modified[k] = m if m
+          original[k] = o
+          modified[k] = m
         end
 
-        return original.easy_diff modified
+        return [original, modified]
       end
 
     end
