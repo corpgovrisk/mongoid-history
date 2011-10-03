@@ -81,11 +81,8 @@ module Mongoid::History
     # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
     def trackable_root_from_hash
       return unless root_name && root_hash
-      enable_allow_dynamic_fields do
-        @trackable_root_from_hash ||=
-          root_name.classify.constantize.new().tap { |ob| ob.write_attributes(root_hash, false); } rescue nil
-      end
-      @trackable_root_from_hash
+      @trackable_root_from_hash ||= 
+        Mongoid::Factory.from_db(doc_name.classify.constantize, root_hash) rescue nil
     end
     
     def trackable
@@ -99,21 +96,8 @@ module Mongoid::History
     # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
     def trackable_from_hash
       return unless doc_name && doc_hash
-      enable_allow_dynamic_fields do
-        @trackable_from_hash ||= 
-          doc_name.classify.constantize.new().tap { |ob| ob.write_attributes(doc_hash, false); } rescue nil
-      end
-      @trackable_from_hash
-    end
-    
-    def enable_allow_dynamic_fields(&block)
-      tmp_allow_dynamic_fields = Mongoid::allow_dynamic_fields
-      begin
-        Mongoid::allow_dynamic_fields = true
-        yield
-      ensure
-        Mongoid::allow_dynamic_fields = tmp_allow_dynamic_fields
-      end
+      @trackable_from_hash ||=
+        Mongoid::Factory.from_db(doc_name.classify.constantize, doc_hash) rescue nil
     end
     
     def trackable_parents
