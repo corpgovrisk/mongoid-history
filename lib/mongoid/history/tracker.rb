@@ -9,11 +9,14 @@ module Mongoid::History
       field           :association_chain,   :type => Array,     :default => []
       field           :modified,            :type => Hash
       field           :original,            :type => Hash
+
       field           :doc_hash,            :type => Hash
       field           :doc_name,            :type => String
       field           :is_embedded,         :type => Boolean
+
       field           :root_hash,           :type => Hash       # Optional
       field           :root_name,           :type => String     # Optional
+
       field           :version,             :type => Integer
       field           :action,              :type => String
       field           :scope,               :type => String
@@ -23,7 +26,7 @@ module Mongoid::History
     end
 
     # ##
-    # # PH: I recommend this be limited to only when the action is :destroy (when restoring a removed object)
+    # # Note: I recommend this be limited to only when the action is :destroy (when restoring a removed object)
     # def undo!(modifier)
     #   if action.to_sym == :destroy
     #     class_name = association_chain[0]["name"]
@@ -35,7 +38,7 @@ module Mongoid::History
     # end
 
     # ##
-    # # PH: I recommend this be limited to only when the action is :destroy (when removing an object)
+    # # Note: I recommend this be limited to only when the action is :destroy (when removing an object)
     # def redo!(modifier)
     #   if action.to_sym == :destroy
     #     trackable.destroy

@@ -11,9 +11,11 @@ module Mongoid::History
           :modifier_field =>  :modifier,
           :version_field  =>  :version,
           :scope          =>  model_name,
+          :track_root     =>  true,
+          :fetch_related  =>  true,
           :track_create   =>  false,
           :track_update   =>  true,
-          :track_destroy  =>  false,
+          :track_destroy  =>  true,
         }
 
         options = default_options.merge(options)
@@ -166,7 +168,8 @@ module Mongoid::History
           history_trackable_options[:except].include?(k)
         end
       end
-
+    
+      # Note: Does not filter by any attributes
       def modified_attributes_for_destroy
         attributes.inject({}) do |h, pair|
           k,v =  pair
@@ -187,7 +190,8 @@ module Mongoid::History
           :modifier           => send(history_trackable_options[:modifier_field])
         }
         
-        if embedded?
+        # If embedded, store a copy of the root object as well (can be quite heavy)
+        if history_trackable_options[:track_root] && embedded?
           @history_tracker_attributes[:root_hash] = _root.as_document
           @history_tracker_attributes[:root_name] = _root.class.name
         end
@@ -200,6 +204,27 @@ module Mongoid::History
 
         @history_tracker_attributes[:original] = original
         @history_tracker_attributes[:modified] = modified
+        
+        # Fetch related fields and call to_s
+        if history_trackable_options[:fetch_related]
+          @history_tracker_attributes[:original].dup.each do |k, v|
+            if k =~ /(.+)_id$/
+              k_name = $1.to_s
+              if !v.blank? && self.relations.include?(k_name)
+                @history_tracker_attributes[:original][k_name] = self.relations[k_name].class_name.constantize.find(v).to_s
+              end
+            end
+          end
+          @history_tracker_attributes[:modified].dup.each do |k, v|
+            if k =~ /(.+)_id$/
+              k_name = $1.to_s
+              if !v.blank? && self.relations.include?(k_name)
+                @history_tracker_attributes[:modified][k_name] = self.send(k_name).to_s
+              end
+            end
+          end
+        end
+        
         @history_tracker_attributes
       end
 
