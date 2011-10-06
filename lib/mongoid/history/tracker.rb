@@ -99,8 +99,9 @@ module Mongoid::History
     # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
     def trackable_from_hash
       return unless doc_name && doc_hash
+      klass = doc_name.classify.constantize
       @trackable_from_hash ||=
-        Mongoid::Factory.from_db(doc_name.classify.constantize, doc_hash) rescue nil
+        klass.instantiate(doc_hash) rescue nil
     end
     
     def trackable_parents
