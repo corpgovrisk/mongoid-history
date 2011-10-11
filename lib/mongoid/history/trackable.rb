@@ -13,7 +13,7 @@ module Mongoid::History
           :scope          =>  model_name,
           :track_root     =>  true,
           :fetch_related  =>  true,
-          :track_create   =>  false,
+          :track_create   =>  true,
           :track_update   =>  true,
           :track_destroy  =>  true,
         }
