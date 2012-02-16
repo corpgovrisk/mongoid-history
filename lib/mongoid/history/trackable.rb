@@ -110,6 +110,14 @@ module Mongoid::History
           self.write_attributes(redo_attr, false) # guard_protected_attributes = false
         end
       end
+
+      def hydrated_from_hash?
+        !(defined?(@hydrated_from_hash).nil?) && @hydrated_from_hash.eql?(true)
+      end
+
+      def hydrated_from_hash!
+        @hydrated_from_hash = true
+      end
     
     ##
     # PRIVATE

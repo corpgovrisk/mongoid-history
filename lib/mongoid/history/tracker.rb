@@ -86,6 +86,8 @@ module Mongoid::History
       return unless root_name && root_hash
       @trackable_root_from_hash ||= 
         Mongoid::Factory.from_db(doc_name.classify.constantize, root_hash) rescue nil
+      @trackable_root_from_hash.hydrated_from_hash! if !(defined?(@trackable_root_from_hash).nil?) &&  @trackable_root_from_hash.respond_to?(:hydrated_from_hash!)
+      @trackable_root_from_hash
     end
     
     def trackable
@@ -102,6 +104,8 @@ module Mongoid::History
       klass = doc_name.classify.constantize
       @trackable_from_hash ||=
         klass.instantiate(doc_hash) rescue nil
+      @trackable_from_hash.hydrated_from_hash! if !(defined?(@trackable_from_hash).nil?) &&  @trackable_from_hash.respond_to?(:hydrated_from_hash!)
+      @trackable_from_hash
     end
     
     def trackable_parents
