@@ -88,7 +88,7 @@ module Mongoid::History
 
       def most_recent_history(history_obj, unique = :_id)
         time_point = history_obj.is_a?(Time) ? history_obj : (history_obj.respond_to?(:created_at) ? history_obj.created_at : Time.now)
-        ids = history_for_class.where(:created_at.lte => history.created_at).distinct("doch_hash.#{unique.to_s}")
+        ids = history_for_class.where(:created_at.lte => time_point).distinct("doch_hash.#{unique.to_s}")
         history_for_class.in("doc_hash.#{unique.to_s}" => ids)
       end
     end
