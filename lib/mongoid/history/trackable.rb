@@ -16,6 +16,7 @@ module Mongoid::History
           :track_create   =>  true,
           :track_update   =>  true,
           :track_destroy  =>  true,
+          :trigger        =>  nil,
         }
 
         options = default_options.merge(options)
@@ -33,6 +34,15 @@ module Mongoid::History
         if options[:on] != :all
           options[:on] = [options[:on]] unless options[:on].is_a? Array
           options[:on] = options[:on].map(&:to_s).flatten.uniq
+        end
+
+        if options[:trigger].is_a?(Symbol)
+          # convert to hash so we know how to find the trigger
+          if self.respond_to?(:relations) && self.relations[options[:trigger].to_s] != nil
+            options[:trigger] = {:target => options[:trigger], :type => :relation}
+          elsif (self.instance_methods + self.private_instance_methods).include?(options[:trigger])
+            options[:trigger] = {:target => options[:trigger], :type => :method}
+          end
         end
 
         field options[:version_field].to_sym, :type => Integer
@@ -71,6 +81,16 @@ module Mongoid::History
       def track_history_flag
         "mongoid_history_#{self.name.underscore}_trackable_enabled".to_sym
       end
+
+      def history_for_class
+        Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope]).order_by(:created_at.asc)
+      end
+
+      def most_recent_history(history_obj, unique = :_id)
+        time_point = history_obj.is_a?(Time) ? history_obj : (history_obj.respond_to?(:created_at) ? history_obj.created_at : Time.now)
+        ids = history_for_class.where(:created_at.lte => history.created_at).distinct("doch_hash.#{unique.to_s}")
+        history_for_class.in("doc_hash.#{unique.to_s}" => ids)
+      end
     end
 
     module InstanceMethods
@@ -78,9 +98,6 @@ module Mongoid::History
         @history_tracks ||= Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope], :association_chain => traverse_association_chain)
       end
 
-      #  undo :from => 1, :to => 5
-      #  undo 4
-      #  undo :last => 10
       def undo!(modifier, options_or_version=nil)
         _undo(modifier, options_or_version)
         save!
@@ -118,6 +135,12 @@ module Mongoid::History
       def hydrated_from_hash!
         @hydrated_from_hash = true
       end
+
+      def _history_recorded_from_child(child, history_obj, chain = [])
+        @history_bubbled_from_child = {:chain => chain, :history => history_obj, :source => child}
+
+        track_update
+      end
     
     ##
     # PRIVATE
@@ -145,7 +168,7 @@ module Mongoid::History
       end
 
       def should_track_update?
-        track_history? && !modified_attributes_for_update.blank?
+        track_history? && (!modified_attributes_for_update.blank? || !(defined?(@history_bubbled_from_child).nil?))
       end
 
       def traverse_association_chain(node=self)
@@ -186,6 +209,15 @@ module Mongoid::History
         end
       end
 
+      def key_for_obj(obj)
+        self.class.relations.keys.each do |key|
+          target = self.send(key.to_sym)
+          return key if (target.eql?(obj) || target.respond_to?(:include?) && target.include?(obj))
+        end
+
+        nil
+      end
+
       def history_tracker_attributes(method)
         return @history_tracker_attributes if @history_tracker_attributes
 
@@ -209,6 +241,15 @@ module Mongoid::History
           when :create then modified_attributes_for_create
           else modified_attributes_for_update
         end)
+
+        unless defined?(@history_bubbled_from_child).nil?
+          relation_key = key_for_obj(@history_bubbled_from_child[:source])
+
+          unless relation_key.nil?
+            original[relation_key] = @history_bubbled_from_child[:history][:original]
+            modified[relation_key] = @history_bubbled_from_child[:history][:modified]
+          end
+        end
 
         @history_tracker_attributes[:original] = original
         @history_tracker_attributes[:modified] = modified
@@ -240,23 +281,27 @@ module Mongoid::History
         return unless should_track_update?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
         self.send("#{history_trackable_options[:version_field]}=", current_version)
-        Mongoid::History.tracker_class.create!(history_tracker_attributes(:update).merge(:version => current_version, :action => "update"))
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:update).merge(:version => current_version, :action => "update"))
         clear_memoization
+
+        notify_trigger history_obj
       end
 
       def track_create
         return unless track_history?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
         self.send("#{history_trackable_options[:version_field]}=", current_version)
-        Mongoid::History.tracker_class.create!(history_tracker_attributes(:create).merge(:version => current_version, :action => "create"))
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:create).merge(:version => current_version, :action => "create"))
         clear_memoization
       end
 
       def track_destroy
         return unless track_history?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
-        Mongoid::History.tracker_class.create!(history_tracker_attributes(:destroy).merge(:version => current_version, :action => "destroy"))
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:destroy).merge(:version => current_version, :action => "destroy"))
         clear_memoization
+
+        notify_trigger history_obj
       end
 
       def clear_memoization
@@ -280,6 +325,26 @@ module Mongoid::History
         end
 
         return [original, modified]
+      end
+
+      def notify_trigger(history_obj, chain = nil)
+        chain = @history_bubbled_from_child if chain.nil? && !(defined?(@history_bubbled_from_child).nil?)
+
+        if history_trackable_options[:trigger].is_a?(Hash) && history_trackable_options[:trigger][:type] != nil
+          case history_trackable_options[:trigger][:type]
+          when :method
+            self.send(history_trackable_options[:trigger][:target], history_obj) if self.respond_to?(history_trackable_options[:trigger][:target])
+          when :relation
+            target = self.send(history_trackable_options[:trigger][:target])
+            if (target.is_a?(Array))
+              target.each do |obj|
+                obj.send(:_history_recorded_from_child, self, history_obj, chain) if obj.respond_to?(:_history_recorded_from_child)
+              end
+            else
+              target.send(:_history_recorded_from_child, self, history_obj, chain) if target.respond_to?(:_history_recorded_from_child)
+            end
+          end
+        end
       end
 
     end
