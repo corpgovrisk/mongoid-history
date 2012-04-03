@@ -366,10 +366,9 @@ module Mongoid::History
 
           unless relation_key.nil?
             # record the bubble event
-            @history_tracker_attributes[:bubble_chain] = [{:key => key_for_obj, 
+            @history_tracker_attributes[:bubble_chain] = [{:key => relation_key, 
                                                           :id => @history_bubbled_from_child[:source].id, 
-                                                          :hash => @history_bubbled_from_child[:source].id.as_document}]
-                                                      + @history_bubbled_from_child[:chain]
+                                                          :hash => @history_bubbled_from_child[:source].as_document}].concat(@history_bubbled_from_child[:chain])
 
             original[relation_key] = @history_bubbled_from_child[:history][:original]
             modified[relation_key] = @history_bubbled_from_child[:history][:modified]
@@ -453,7 +452,7 @@ module Mongoid::History
       end
 
       def notify_trigger(history_obj)
-        chain = (!(defined?(@history_bubbled_from_child).nil?) && @history_bubbled_from_child != nil && @history_bubbled_from_child[:chain].is_a?(Array)) ? @history_bubbled_from_child[:chain] : []
+        chain = history_obj.nil? || history_obj.bubble_chain.nil? ? [] : history_obj.bubble_chain
 
         if history_trackable_options[:trigger].is_a?(Hash) && history_trackable_options[:trigger][:type] != nil
           case history_trackable_options[:trigger][:type]

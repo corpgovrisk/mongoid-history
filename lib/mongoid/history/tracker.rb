@@ -119,6 +119,13 @@ module Mongoid::History
         trackable ? trackable.attributes[k] : modified[k]; h}
     end
 
+    def chain_for_bubble_key(key)
+      return nil if self.bubble_chain.nil?
+      indexed_mark = self.bubble_chain.index {|obj| obj["key"].eql?(key)}
+
+      indexed_mark.nil? ? nil : self.bubble_chain[indexed_mark]
+    end
+
     private
       def trackable_parents_and_trackable
         @trackable_parents_and_trackable ||= traverse_association_chain
