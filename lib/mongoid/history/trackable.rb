@@ -36,13 +36,44 @@ module Mongoid::History
           options[:on] = options[:on].map(&:to_s).flatten.uniq
         end
 
+        # developer has provided options for defining triggers
         if options[:trigger].is_a?(Symbol)
           # convert to hash so we know how to find the trigger
-          if self.respond_to?(:relations) && self.relations[options[:trigger].to_s] != nil
+          if self.respond_to?(:relations) && self.relations[options[:trigger].to_s] != nil # ensure that this relation is valid
             options[:trigger] = {:target => options[:trigger], :type => :relation}
-          elsif (self.instance_methods + self.private_instance_methods).include?(options[:trigger])
+          elsif (self.instance_methods + self.private_instance_methods).include?(options[:trigger]) # developer may have specified a method call, let's be sure it exists
             options[:trigger] = {:target => options[:trigger], :type => :method}
           end
+        end
+
+        # developer has specified that certain relations can be brought it as deep versions
+        unless options[:restore_for].nil?
+          options[:restore_for] = [options[:restore_for]] unless options[:restore_for].is_a?(Array) # suger for quick relation specs
+
+          relation_list = options[:restore_for].map do |obj|
+            ret = nil
+            obj = obj.to_sym if obj.is_a?(String)
+            if obj.is_a?(Symbol)
+              begin
+                hash_data = relations[obj.to_s]
+                # do the hard work now and determine info about our relation
+                if hash_data != nil && hash_data.class_name != nil && hash_data.class_name.constantize.respond_to?(:most_recent_history)
+                  ret = {:target => obj, :target_class => hash_data.class_name.constantize, 
+                          :type => hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? :many_to_many : (hash_data.relation.ancestors.include?(Mongoid::Relations::Many) ? :many : :one),
+                          :foreign_key => (hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? hash_data.key : hash_data.as)}
+                end
+              rescue Exception => e
+                puts "#{self.name}: Failure to resolve #{obj} relations. Tried #{hash_data.class_name}. #{e}"
+              end
+            elsif(obj.is_a?(Hash) && obj[:target] != nil && obj[:target_class] != nil)
+              ret = obj # developer has provided direct instructions about the relation
+            end
+
+            ret
+          end
+
+          options[:restore_for] = relation_list.compact
+
         end
 
         field options[:version_field].to_sym, :type => Integer
@@ -83,13 +114,24 @@ module Mongoid::History
       end
 
       def history_for_class
-        Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope]).order_by(:created_at.asc)
+        Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope]).order_by(:created_at.desc)
       end
 
       def most_recent_history(history_obj, unique = :_id)
         time_point = history_obj.is_a?(Time) ? history_obj : (history_obj.respond_to?(:created_at) ? history_obj.created_at : Time.now)
-        ids = history_for_class.where(:created_at.lte => time_point).distinct("doch_hash.#{unique.to_s}")
-        history_for_class.in("doc_hash.#{unique.to_s}" => ids)
+        ids = history_for_class.where(:created_at.lte => time_point)
+
+        seen_ids = []
+        ids = ids.to_a.reject do |history|
+          if seen_ids.include?(history.doc_hash[unique.to_s])
+            true
+          else
+            seen_ids << history.doc_hash[unique.to_s]
+            false
+          end
+        end
+
+        history_for_class.in("_id" => ids.map {|obj| obj.id})
       end
     end
 
@@ -132,14 +174,89 @@ module Mongoid::History
         !(defined?(@hydrated_from_hash).nil?) && @hydrated_from_hash.eql?(true)
       end
 
-      def hydrated_from_hash!
+      def hydrated_from_hash!(original_history = nil)
         @hydrated_from_hash = true
+
+        # override relation accessors
+        if history_trackable_options[:restore_for].is_a?(Array)
+
+          # define a method that allows us to inject methods on the fly
+          unless self.respond_to?(:metaclass)
+            def self.metaclass
+              class << self; self; end
+            end
+          end
+
+          history_trackable_options[:restore_for].each do |restore_data|
+            if (restore_data[:target] != nil && restore_data[:target_class] != nil)
+              # if the document hash stored an old embedded version then use that
+              if original_history != nil && original_history.doc_hash[restore_data[:target].to_s] != nil
+                self.metaclass.send(:define_method, restore_data[:target].to_s) do
+                  # wakeup
+                  if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
+                    original_history.doc_hash[restore_data[:target].to_s].map {|hash_obj| restore_data[:target_class].instantiate(hash_obj) }
+                  else
+                    restore_data[:target_class].instantiate(original_history.doc_hash[restore_data[:target].to_s])
+                  end
+                end
+              else # restore the current version based on related history
+                target_created_at = original_history.is_a?(History) ? original_history.created_at : self.created_at
+
+                # override our relation lookup
+                self.metaclass.send(:define_method, restore_data[:target].to_s) do
+                  history_point = restore_data[:target_class].most_recent_history(target_created_at)
+
+                  target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id".to_sym : restore_data[:foreign_key]
+
+                  # scope history
+                  if restore_data[:type].eql?(:many)
+                    history_point = history_point.where("doc_hash.#{target_key}_id" => self.id)
+                  elsif restore_data[:type].eql?(:many_to_many)
+                    history_point = history_point.in("doc_hash._id" => self.send(target_key))
+                  else
+                    history_point = history_point.where("doc_hash._id" => self.send(target_key))
+                  end
+
+                  # resolve
+                  if restore_data[:type].eql?(:one)
+
+                    # couldn't find a history object
+                    if (history_point.first.nil?)
+                      # find actual in DB that was created before history
+                      restore_data[:target_class].find(self.send(target_key))
+                    else
+                      (history_point.first.trackable_root_from_hash || history_point.first.trackable_from_hash) # restore
+                    end
+                  else
+                    # filter out duplicate doc_ids
+                    seen_ids = []
+                    history_point = history_point.to_a.reject do |history|
+                      if seen_ids.include?(history.doc_hash["_id"])
+                        true
+                      else
+                        seen_ids << history.doc_hash["_id"]
+                        false
+                      end
+                    end
+
+                    (history_point.map {|h| (h.trackable_root_from_hash || h.trackable_from_hash) }) # restore for many relation
+                  end
+                end
+              end
+            end
+          end
+        end
       end
 
+      # Received a notification from a relation that it was updated
       def _history_recorded_from_child(child, history_obj, chain = [])
         @history_bubbled_from_child = {:chain => chain, :history => history_obj, :source => child}
 
         track_update
+
+        @history_bubbled_from_child = nil
+
+        true
       end
     
     ##
@@ -168,7 +285,7 @@ module Mongoid::History
       end
 
       def should_track_update?
-        track_history? && (!modified_attributes_for_update.blank? || !(defined?(@history_bubbled_from_child).nil?))
+        track_history? && (!modified_attributes_for_update.blank? || ((!(defined?(@history_bubbled_from_child).nil?)) && @history_bubbled_from_child != nil))
       end
 
       def traverse_association_chain(node=self)
@@ -242,10 +359,18 @@ module Mongoid::History
           else modified_attributes_for_update
         end)
 
-        unless defined?(@history_bubbled_from_child).nil?
+        # store info about relation history events
+
+        unless defined?(@history_bubbled_from_child).nil? || @history_bubbled_from_child.nil?
           relation_key = key_for_obj(@history_bubbled_from_child[:source])
 
           unless relation_key.nil?
+            # record the bubble event
+            @history_tracker_attributes[:bubble_chain] = [{:key => key_for_obj, 
+                                                          :id => @history_bubbled_from_child[:source].id, 
+                                                          :hash => @history_bubbled_from_child[:source].id.as_document}]
+                                                      + @history_bubbled_from_child[:chain]
+
             original[relation_key] = @history_bubbled_from_child[:history][:original]
             modified[relation_key] = @history_bubbled_from_child[:history][:modified]
           end
@@ -327,20 +452,20 @@ module Mongoid::History
         return [original, modified]
       end
 
-      def notify_trigger(history_obj, chain = nil)
-        chain = @history_bubbled_from_child if chain.nil? && !(defined?(@history_bubbled_from_child).nil?)
+      def notify_trigger(history_obj)
+        chain = (!(defined?(@history_bubbled_from_child).nil?) && @history_bubbled_from_child != nil && @history_bubbled_from_child[:chain].is_a?(Array)) ? @history_bubbled_from_child[:chain] : []
 
         if history_trackable_options[:trigger].is_a?(Hash) && history_trackable_options[:trigger][:type] != nil
           case history_trackable_options[:trigger][:type]
-          when :method
+          when :method # developer has defined a special method that we should call
             self.send(history_trackable_options[:trigger][:target], history_obj) if self.respond_to?(history_trackable_options[:trigger][:target])
-          when :relation
+          when :relation # we have a relation that may support history tracking
             target = self.send(history_trackable_options[:trigger][:target])
-            if (target.is_a?(Array))
+            if (target.is_a?(Array)) # target is a many relation
               target.each do |obj|
                 obj.send(:_history_recorded_from_child, self, history_obj, chain) if obj.respond_to?(:_history_recorded_from_child)
               end
-            else
+            else # target is a single relation
               target.send(:_history_recorded_from_child, self, history_obj, chain) if target.respond_to?(:_history_recorded_from_child)
             end
           end
