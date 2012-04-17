@@ -126,6 +126,33 @@ module Mongoid::History
       indexed_mark.nil? ? nil : self.bubble_chain[indexed_mark]
     end
 
+    def modification_as_array(mod_hash = nil)
+      res = []
+      mod_hash = self.modified if mod_hash.nil?
+      mod_hash.each do |key, value|
+        chain = chain_for_bubble_key(key)
+        unless chain.nil?
+          # try to resolve the type of the relation
+          res << {:key => key, :value => chain, :hash => value}
+          res = res + modification_as_array(value)
+        end
+      end
+      res
+    end
+
+    def all_actions
+      acts = self.bubble_chain.map{|h| h["history_obj"]["action"] rescue nil}
+      acts << self.action
+      acts.compact
+    end
+
+    def prominent_action
+      return 'destroy' if all_actions.include?('destroy')
+      return 'create' if all_actions.include?('create')
+
+      self.action
+    end
+
     private
       def trackable_parents_and_trackable
         @trackable_parents_and_trackable ||= traverse_association_chain

@@ -383,7 +383,8 @@ module Mongoid::History
 
           unless relation_key.nil?
             # record the bubble event
-            @history_tracker_attributes[:bubble_chain] = [{:key => relation_key, 
+            @history_tracker_attributes[:bubble_chain] = [{:key => relation_key,
+                                                          :history_obj => @history_bubbled_from_child[:history].respond_to?(:as_document) ? {} : @history_bubbled_from_child[:history].as_document,
                                                           :id => @history_bubbled_from_child[:source].id, 
                                                           :hash => @history_bubbled_from_child[:source].as_document}].concat(@history_bubbled_from_child[:chain])
 
