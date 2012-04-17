@@ -223,19 +223,33 @@ module Mongoid::History
                     # couldn't find a history object
                     if (history_point.first.nil?)
                       # find actual in DB that was created before history
-                      restore_data[:target_class].find(self.send(target_key))
+                      obj = nil
+                      begin
+                        restore_data[:target_class].find(self.send(target_key))
+                      rescue
+                      end
+                      obj
                     else
-                      (history_point.first.trackable_root_from_hash || history_point.first.trackable_from_hash) # restore
+                      if history_point.first.action.eql?('destroy')
+                        nil
+                      else
+                        (history_point.first.trackable_root_from_hash || history_point.first.trackable_from_hash) # restore
+                      end
                     end
                   else
                     # filter out duplicate doc_ids
                     seen_ids = []
                     history_point = history_point.to_a.reject do |history|
-                      if seen_ids.include?(history.doc_hash["_id"])
+                      if history.action.eql?('destroy')
                         true
-                      else
                         seen_ids << history.doc_hash["_id"]
-                        false
+                      else
+                        if seen_ids.include?(history.doc_hash["_id"])
+                          true
+                        else
+                          seen_ids << history.doc_hash["_id"]
+                          false
+                        end
                       end
                     end
 
@@ -251,7 +265,6 @@ module Mongoid::History
       # Received a notification from a relation that it was updated
       def _history_recorded_from_child(child, history_obj, chain = [])
         @history_bubbled_from_child = {:chain => chain, :history => history_obj, :source => child}
-
         track_update
 
         @history_bubbled_from_child = nil
@@ -286,6 +299,10 @@ module Mongoid::History
 
       def should_track_update?
         track_history? && (!modified_attributes_for_update.blank? || ((!(defined?(@history_bubbled_from_child).nil?)) && @history_bubbled_from_child != nil))
+      end
+
+      def should_track_create?
+        track_history?
       end
 
       def traverse_association_chain(node=self)
@@ -412,11 +429,13 @@ module Mongoid::History
       end
 
       def track_create
-        return unless track_history?
+        return unless should_track_create?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
         self.send("#{history_trackable_options[:version_field]}=", current_version)
         history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:create).merge(:version => current_version, :action => "create"))
         clear_memoization
+
+        notify_trigger history_obj
       end
 
       def track_destroy
