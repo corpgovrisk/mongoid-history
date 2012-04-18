@@ -140,6 +140,20 @@ module Mongoid::History
       res
     end
 
+    def original_as_array(orig_hash = nil)
+      res = []
+      orig_hash = self.original if orig_hash.nil?
+      orig_hash.each do |key, value|
+        chain = chain_for_bubble_key(key)
+        unless chain.nil?
+          # try to resolve the type of the relation
+          res << {:key => key, :value => chain, :hash => value}
+          res = res + original_as_array(value)
+        end
+      end
+      res
+    end
+
     def all_actions
       acts = self.bubble_chain.map{|h| h["history_obj"]["action"] rescue nil}
       acts << self.action
