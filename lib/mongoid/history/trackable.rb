@@ -126,9 +126,13 @@ module Mongoid::History
         Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope]).order_by(:created_at.desc)
       end
 
-      def most_recent_history(history_obj, unique = :_id)
+      def most_recent_history(history_obj, additional_scope = {}, unique = :_id)
         time_point = history_obj.is_a?(Time) ? history_obj : (history_obj.respond_to?(:created_at) ? history_obj.created_at : Time.now)
         ids = history_for_class.where(:created_at.lte => time_point)
+
+        unless additional_scope.empty?
+          ids = ids.where(additional_scope)
+        end
 
         seen_ids = []
         ids = ids.to_a.reject do |history|
@@ -243,19 +247,22 @@ module Mongoid::History
                 # override our relation lookup
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
                   puts "Finding history"
-                  history_point = restore_data[:target_class].most_recent_history(target_created_at)
 
-                  target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id".to_sym : restore_data[:foreign_key]
+                  target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id#{restore_data[:type].eql?(:many_to_many) ? "s" : ""}".to_sym : restore_data[:foreign_key]
+
+                  scope = {}
 
                   # scope history
                   puts "Scoping history"
                   if restore_data[:type].eql?(:many)
-                    history_point = history_point.where("doc_hash.#{target_key}_id" => self.id)
+                    scope = {:"doc_hash.#{target_key}_id" => self.id}
                   elsif restore_data[:type].eql?(:many_to_many)
-                    history_point = history_point.in("doc_hash._id" => self.send(target_key))
+                    scope = {:"doc_hash._id".in => self.send(target_key)}
                   else
-                    history_point = history_point.where("doc_hash._id" => self.send(target_key))
+                    scope = {:"doc_hash._id" => self.send(target_key)}
                   end
+
+                  history_point = restore_data[:target_class].most_recent_history(target_created_at, scope)
 
                   # resolve
                   if restore_data[:type].eql?(:one)
