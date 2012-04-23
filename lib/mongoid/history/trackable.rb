@@ -61,6 +61,15 @@ module Mongoid::History
                   ret = {:target => obj, :target_class => hash_data.class_name.constantize, 
                           :type => hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? :many_to_many : (hash_data.relation.ancestors.include?(Mongoid::Relations::Many) ? :many : :one),
                           :foreign_key => (hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? hash_data.key : hash_data.as)}
+                  unless hash_data.order.nil?
+                    if hash_data.order.is_a?(Mongoid::Criterion::Complex)
+                      ret[:order_by_key] = hash_data.order.key
+                      ret[:order_by_op] = hash_data.order.operator.to_sym
+                    else
+                      ret[:order_by_key] = hash_data.order
+                      ret[:order_by_op] = :asc
+                    end
+                  end
                 end
               rescue Exception => e
                 puts "#{self.name}: Failure to resolve #{obj} relations. Tried #{hash_data.class_name}. #{e}"
@@ -188,15 +197,44 @@ module Mongoid::History
           end
 
           history_trackable_options[:restore_for].each do |restore_data|
+            puts "Seeing if I can build a restoration tool for #{restore_data}"
             if (restore_data[:target] != nil && restore_data[:target_class] != nil)
               # if the document hash stored an old embedded version then use that
               if original_history != nil && original_history.doc_hash[restore_data[:target].to_s] != nil
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
                   # wakeup
                   if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
-                    original_history.doc_hash[restore_data[:target].to_s].map {|hash_obj| restore_data[:target_class].instantiate(hash_obj) }
+                    hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj| 
+                      # we need to fake it was also restored from a history objedct
+                      hydated_obj = restore_data[:target_class].instantiate(hash_obj)
+                      internal_history = History.new
+                      internal_history.doc_hash = hash_obj
+                      hydated_obj.hydrated_from_hash!(internal_history)
+                      hydated_obj
+                    end
+
+                    if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
+                      hydrates.sort! do |a,b|
+                        begin
+                          if restore_data[:order_by_op].eql?(:asc)
+                            a.send(restore_data[:order_by_key].to_sym) <=> b.send(restore_data[:order_by_key].to_sym)
+                          else
+                            b.send(restore_data[:order_by_key].to_sym) <=> a.send(restore_data[:order_by_key].to_sym)
+                          end
+                        rescue
+                          0
+                        end
+                      end
+                    end
+
+                    hydrates
                   else
-                    restore_data[:target_class].instantiate(original_history.doc_hash[restore_data[:target].to_s])
+                    hash_obj = original_history.doc_hash[restore_data[:target].to_s]
+                    hydated_obj = restore_data[:target_class].instantiate(hash_obj)
+                    internal_history = History.new
+                    internal_history.doc_hash = hash_obj
+                    hydated_obj.hydrated_from_hash!(internal_history)
+                    hydated_obj
                   end
                 end
               else # restore the current version based on related history
@@ -204,11 +242,13 @@ module Mongoid::History
 
                 # override our relation lookup
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
+                  puts "Finding history"
                   history_point = restore_data[:target_class].most_recent_history(target_created_at)
 
                   target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id".to_sym : restore_data[:foreign_key]
 
                   # scope history
+                  puts "Scoping history"
                   if restore_data[:type].eql?(:many)
                     history_point = history_point.where("doc_hash.#{target_key}_id" => self.id)
                   elsif restore_data[:type].eql?(:many_to_many)
@@ -225,7 +265,7 @@ module Mongoid::History
                       # find actual in DB that was created before history
                       obj = nil
                       begin
-                        restore_data[:target_class].find(self.send(target_key))
+                        obj = restore_data[:target_class].find(self.send(target_key))
                       rescue
                       end
                       obj
@@ -239,6 +279,7 @@ module Mongoid::History
                   else
                     # filter out duplicate doc_ids
                     seen_ids = []
+                    puts "Filtering out dupes"
                     history_point = history_point.to_a.reject do |history|
                       if history.action.eql?('destroy')
                         true
@@ -252,8 +293,24 @@ module Mongoid::History
                         end
                       end
                     end
+                    puts "Running sort....."
+                    hydrates = (history_point.map {|h| (h.trackable_root_from_hash || h.trackable_from_hash) }) # restore for many relation
+                    if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
+                      hydrates.sort! do |a,b|
+                        begin
+                          if restore_data[:order_by_op].eql?(:asc)
+                            a.send(restore_data[:order_by_key].to_sym) <=> b.send(restore_data[:order_by_key].to_sym)
+                          else
+                            b.send(restore_data[:order_by_key].to_sym) <=> a.send(restore_data[:order_by_key].to_sym)
+                          end
+                        rescue
+                          0
+                        end
+                      end
+                    end
 
-                    (history_point.map {|h| (h.trackable_root_from_hash || h.trackable_from_hash) }) # restore for many relation
+                    hydrates
+
                   end
                 end
               end
