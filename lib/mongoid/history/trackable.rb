@@ -59,7 +59,7 @@ module Mongoid::History
                 # do the hard work now and determine info about our relation
                 if hash_data != nil && hash_data.class_name != nil && hash_data.class_name.constantize.respond_to?(:most_recent_history)
                   ret = {:target => obj, :target_class => hash_data.class_name.constantize, 
-                          :type => hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? :many_to_many : (hash_data.relation.ancestors.include?(Mongoid::Relations::Many) ? :many : :one),
+                          :type => Mongoid::History::Trackable::Helpers.determine_relation_type(hash_data.relation),
                           :foreign_key => (hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? hash_data.key : hash_data.as)}
                   unless hash_data.order.nil?
                     if hash_data.order.is_a?(Mongoid::Criterion::Complex)
@@ -72,7 +72,12 @@ module Mongoid::History
                   end
                 end
               rescue Exception => e
-                puts "#{self.name}: Failure to resolve #{obj} relations. Tried #{hash_data.class_name}. #{e}"
+                msg = "Mongoid-history: #{self.name}: Failure to resolve #{obj} relations. Tried #{hash_data.class_name}. #{e}"
+                if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
+                  Rails.logger.error msg
+                else
+                  puts msg
+                end
               end
             elsif(obj.is_a?(Hash) && obj[:target] != nil && obj[:target_class] != nil)
               ret = obj # developer has provided direct instructions about the relation
@@ -201,15 +206,15 @@ module Mongoid::History
           end
 
           history_trackable_options[:restore_for].each do |restore_data|
-            puts "Seeing if I can build a restoration tool for #{restore_data}"
-            if (restore_data[:target] != nil && restore_data[:target_class] != nil)
+            Rails.logger.debug("Mongoid-history: Seeing if I can build a restoration tool for #{restore_data}") if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
+            if (restore_data[:target] != nil && restore_data[:target_class] != nil) || restore
               # if the document hash stored an old embedded version then use that
               if original_history != nil && original_history.doc_hash[restore_data[:target].to_s] != nil
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
                   # wakeup
                   if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
                     hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj| 
-                      # we need to fake it was also restored from a history objedct
+                      # we need to fake it was also restored from a history object
                       hydated_obj = restore_data[:target_class].instantiate(hash_obj)
                       internal_history = History.new
                       internal_history.doc_hash = hash_obj
@@ -244,20 +249,22 @@ module Mongoid::History
               else # restore the current version based on related history
                 target_created_at = original_history.is_a?(History) ? original_history.created_at : self.created_at
 
-                # override our relation lookup
+                # override our relation lookup (unless type is embedded -- already designed for that)
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
-                  puts "Finding history"
-
+                  Rails.logger.debug("Mongoid-history: #{self.class} #{restore_data[:target]} called via #{caller.join("\t\n")}")  if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
                   target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id#{restore_data[:type].eql?(:many_to_many) ? "s" : ""}".to_sym : restore_data[:foreign_key]
 
                   scope = {}
 
+
+
                   # scope history
-                  puts "Scoping history"
                   if restore_data[:type].eql?(:many)
                     scope = {:"doc_hash.#{target_key}_id" => self.id}
                   elsif restore_data[:type].eql?(:many_to_many)
                     scope = {:"doc_hash._id".in => self.send(target_key)}
+                  elsif restore_data[:type].eql?(:embedded) || restore_data[:type].eql?(:embedded_many)
+                    scope = {"root_hash._id"=>self.id, :scope => restore_data[:target]}
                   else
                     scope = {:"doc_hash._id" => self.send(target_key)}
                   end
@@ -265,7 +272,7 @@ module Mongoid::History
                   history_point = restore_data[:target_class].most_recent_history(target_created_at, scope)
 
                   # resolve
-                  if restore_data[:type].eql?(:one)
+                  if restore_data[:type].eql?(:one) || restore_data[:type].eql?(:embedded)
 
                     # couldn't find a history object
                     if (history_point.first.nil?)
@@ -280,13 +287,12 @@ module Mongoid::History
                       if history_point.first.action.eql?('destroy')
                         nil
                       else
-                        (history_point.first.trackable_root_from_hash || history_point.first.trackable_from_hash) # restore
+                        (history_point.first.trackable_from_hash || history_point.first.trackable_root_from_hash) # restore
                       end
                     end
                   else
                     # filter out duplicate doc_ids
                     seen_ids = []
-                    puts "Filtering out dupes"
                     history_point = history_point.to_a.reject do |history|
                       if history.action.eql?('destroy')
                         true
@@ -300,8 +306,7 @@ module Mongoid::History
                         end
                       end
                     end
-                    puts "Running sort....."
-                    hydrates = (history_point.map {|h| (h.trackable_root_from_hash || h.trackable_from_hash) }) # restore for many relation
+                    hydrates = (history_point.map {|h| (h.trackable_from_hash || h.trackable_root_from_hash) }) # restore for many relation
                     if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
                       hydrates.sort! do |a,b|
                         begin
@@ -560,6 +565,23 @@ module Mongoid::History
     module SingletonMethods
       def history_trackable_options
         @history_trackable_options ||= Mongoid::History.trackable_class_options[self.name.tableize.singularize.to_sym]
+      end
+    end
+
+    module Helpers
+      def self.determine_relation_type(type)
+
+        if type.eql?(Mongoid::Relations::Embedded::One)
+          :embedded
+        elsif type.eql?(Mongoid::Relations::Embedded::Many)
+          :embedded_many
+        elsif type.eql?(Mongoid::Relations::Referenced::ManyToMany)
+          :many_to_many
+        elsif type.ancestors.include?(Mongoid::Relations::Many)
+          :many
+        else
+          :one
+        end
       end
     end
 
