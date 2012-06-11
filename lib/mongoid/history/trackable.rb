@@ -471,7 +471,7 @@ module Mongoid::History
             if k =~ /(.+)_id$/
               k_name = $1.to_s
               if !v.blank? && self.relations.include?(k_name)
-                @history_tracker_attributes[:original][k_name] = self.relations[k_name].class_name.constantize.find(v).to_s
+                @history_tracker_attributes[:original][k_name] = (self.relations[k_name].class_name.constantize.find(v).to_s rescue "")
               end
             end
           end
@@ -479,7 +479,7 @@ module Mongoid::History
             if k =~ /(.+)_id$/
               k_name = $1.to_s
               if !v.blank? && self.relations.include?(k_name)
-                @history_tracker_attributes[:modified][k_name] = self.send(k_name).to_s
+                @history_tracker_attributes[:modified][k_name] = (self.send(k_name).to_s rescue "")
               end
             end
           end
