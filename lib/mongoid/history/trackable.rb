@@ -1,6 +1,5 @@
 module Mongoid::History
   module Trackable
-    extend ActiveSupport::Concern
 
     module ClassMethods
       def track_history(options={})
@@ -583,6 +582,14 @@ module Mongoid::History
           :one
         end
       end
+    end
+
+
+    include InstanceMethods
+    extend ClassMethods
+
+    def self.included(base)
+      base.extend(ClassMethods)
     end
 
   end
