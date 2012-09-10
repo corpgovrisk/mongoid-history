@@ -71,12 +71,7 @@ module Mongoid::History
                   end
                 end
               rescue Exception => e
-                msg = "Mongoid-history: #{self.name}: Failure to resolve #{obj} relations. Tried #{hash_data.class_name}. #{e}"
-                if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
-                  Rails.logger.error msg
-                else
-                  puts msg
-                end
+                ret = {:target => obj, :target_class => :guess, :type => :one}
               end
             elsif(obj.is_a?(Hash) && obj[:target] != nil && obj[:target_class] != nil)
               ret = obj # developer has provided direct instructions about the relation
@@ -206,7 +201,20 @@ module Mongoid::History
 
           history_trackable_options[:restore_for].each do |restore_data|
             Rails.logger.debug("Mongoid-history: Seeing if I can build a restoration tool for #{restore_data}") if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
-            if (restore_data[:target] != nil && restore_data[:target_class] != nil) || restore
+            
+            target_klass = restore_data[:target_class]
+            if target_klass.eql?(:guess)
+
+              target_klass_key = "#{restore_data[:target]}_type"
+              if self[target_klass_key].present?
+                target_klass = self[target_klass_key].constantize rescue nil
+              else
+                target_klass = nil
+              end
+            end
+
+
+            if (restore_data[:target] != nil && target_klass != nil)
               # if the document hash stored an old embedded version then use that
               if original_history != nil && original_history.doc_hash[restore_data[:target].to_s] != nil
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
@@ -214,9 +222,10 @@ module Mongoid::History
                   if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
                     hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj| 
                       # we need to fake it was also restored from a history object
-                      hydated_obj = restore_data[:target_class].instantiate(hash_obj)
+                      hydated_obj = target_klass.instantiate(hash_obj)
                       internal_history = History.new
                       internal_history.doc_hash = hash_obj
+                      internal_history.created_at = original_history.created_at
                       hydated_obj.hydrated_from_hash!(internal_history)
                       hydated_obj
                     end
@@ -238,15 +247,16 @@ module Mongoid::History
                     hydrates
                   else
                     hash_obj = original_history.doc_hash[restore_data[:target].to_s]
-                    hydated_obj = restore_data[:target_class].instantiate(hash_obj)
+                    hydated_obj = target_klass.instantiate(hash_obj)
                     internal_history = History.new
                     internal_history.doc_hash = hash_obj
+                    internal_history.created_at = original_history.created_at
                     hydated_obj.hydrated_from_hash!(internal_history)
                     hydated_obj
                   end
                 end
               else # restore the current version based on related history
-                target_created_at = original_history.is_a?(History) ? original_history.created_at : self.created_at
+                target_created_at = original_history.is_a?(History) && original_history.created_at.present? ? original_history.created_at : self.created_at
 
                 # override our relation lookup (unless type is embedded -- already designed for that)
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
@@ -268,7 +278,7 @@ module Mongoid::History
                     scope = {:"doc_hash._id" => self.send(target_key)}
                   end
 
-                  history_point = restore_data[:target_class].most_recent_history(target_created_at, scope)
+                  history_point = target_klass.most_recent_history(target_created_at, scope)
 
                   # resolve
                   if restore_data[:type].eql?(:one) || restore_data[:type].eql?(:embedded)
@@ -278,7 +288,7 @@ module Mongoid::History
                       # find actual in DB that was created before history
                       obj = nil
                       begin
-                        obj = restore_data[:target_class].find(self.send(target_key))
+                        obj = target_klass.find(self.send(target_key))
                       rescue
                       end
                       obj
@@ -286,6 +296,7 @@ module Mongoid::History
                       if history_point.first.action.eql?('destroy')
                         nil
                       else
+                        history_point.first.created_at = original_history.created_at if original_history.created_at.present?
                         (history_point.first.trackable_from_hash || history_point.first.trackable_root_from_hash) # restore
                       end
                     end
@@ -305,7 +316,10 @@ module Mongoid::History
                         end
                       end
                     end
-                    hydrates = (history_point.map {|h| (h.trackable_from_hash || h.trackable_root_from_hash) }) # restore for many relation
+                    hydrates = history_point.map do |h|
+                      h.created_at = original_history.created_at if original_history.created_at.present?
+                      (h.trackable_from_hash || h.trackable_root_from_hash)
+                    end # restore for many relation
                     if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
                       hydrates.sort! do |a,b|
                         begin
