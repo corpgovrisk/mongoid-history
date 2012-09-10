@@ -90,7 +90,7 @@ module Mongoid::History
         end
 
         field options[:version_field].to_sym, :type => Integer
-        referenced_in options[:modifier_field].to_sym, :class_name => Mongoid::History.modifier_class_name
+        has_and_belongs_to_many options[:modifier_field].to_sym, :class_name => Mongoid::History.modifier_class_name, inverse_of: nil
 
         include InstanceMethods
         extend SingletonMethods

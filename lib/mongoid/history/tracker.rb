@@ -22,7 +22,7 @@ module Mongoid::History
       field           :version,             :type => Integer
       field           :action,              :type => String
       field           :scope,               :type => String
-      referenced_in   :modifier,            :class_name => Mongoid::History.modifier_class_name
+      has_and_belongs_to_many :modifier,            :class_name => Mongoid::History.modifier_class_name, inverse_of: nil
 
       Mongoid::History.tracker_class_name = self.name.tableize.singularize.to_sym
     end
