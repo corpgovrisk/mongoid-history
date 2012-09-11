@@ -186,7 +186,7 @@ module Mongoid::History
         !(defined?(@hydrated_from_hash).nil?) && @hydrated_from_hash.eql?(true)
       end
 
-      def hydrated_from_hash!(original_history = nil)
+      def hydrated_from_hash!(original_history = nil, cache_chain = {})
         @hydrated_from_hash = true
 
         # override relation accessors
@@ -220,14 +220,21 @@ module Mongoid::History
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
                   # wakeup
                   if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
-                    hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj| 
-                      # we need to fake it was also restored from a history object
-                      hydated_obj = target_klass.instantiate(hash_obj)
-                      internal_history = History.new
-                      internal_history.doc_hash = hash_obj
-                      internal_history.created_at = original_history.created_at
-                      hydated_obj.hydrated_from_hash!(internal_history)
-                      hydated_obj
+                    hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj|
+
+                      # check if we have a cached in the history chain
+                      if cache_chain[hash_obj["_id"].to_s].present?
+                        cache_chain[hash_obj["_id"].to_s]
+                      else
+                        # we need to fake it was also restored from a history object
+                        hydated_obj = target_klass.instantiate(hash_obj)
+                        internal_history = History.new
+                        internal_history.doc_hash = hash_obj
+                        internal_history.created_at = original_history.created_at
+                        hydated_obj.hydrated_from_hash!(internal_history, cache_chain)
+                        cache_chain[hydated_obj.id.to_s] = hydated_obj
+                        hydated_obj
+                      end
                     end
 
                     if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
@@ -247,12 +254,17 @@ module Mongoid::History
                     hydrates
                   else
                     hash_obj = original_history.doc_hash[restore_data[:target].to_s]
-                    hydated_obj = target_klass.instantiate(hash_obj)
-                    internal_history = History.new
-                    internal_history.doc_hash = hash_obj
-                    internal_history.created_at = original_history.created_at
-                    hydated_obj.hydrated_from_hash!(internal_history)
-                    hydated_obj
+                    if cache_chain[hash_obj["_id"].to_s].present?
+                      cache_chain[hash_obj["_id"].to_s]
+                    else 
+                      hydated_obj = target_klass.instantiate(hash_obj)
+                      internal_history = History.new
+                      internal_history.doc_hash = hash_obj
+                      internal_history.created_at = original_history.created_at
+                      hydated_obj.hydrated_from_hash!(internal_history, cache_chain)
+                      cache_chain[hydated_obj.id.to_s] = hydated_obj
+                      hydated_obj
+                    end
                   end
                 end
               else # restore the current version based on related history
@@ -260,7 +272,7 @@ module Mongoid::History
 
                 # override our relation lookup (unless type is embedded -- already designed for that)
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
-                  Rails.logger.debug("Mongoid-history: #{self.class} #{restore_data[:target]} called via #{caller.join("\t\n")}")  if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
+                  Rails.logger.debug("Mongoid-history: #{self.class} #{restore_data[:target]} called")  if !(defined?(Rails).nil?) && Rails.respond_to?(:logger)
                   target_key = restore_data[:foreign_key].nil? ? "#{restore_data[:target]}_id#{restore_data[:type].eql?(:many_to_many) ? "s" : ""}".to_sym : restore_data[:foreign_key]
 
                   scope = {}
@@ -278,64 +290,72 @@ module Mongoid::History
                     scope = {:"doc_hash._id" => self.send(target_key)}
                   end
 
-                  history_point = target_klass.most_recent_history(target_created_at, scope)
+                  cached_obj = cache_chain[scope[:"doc_hash._id"].to_s]
 
-                  # resolve
-                  if restore_data[:type].eql?(:one) || restore_data[:type].eql?(:embedded)
-
-                    # couldn't find a history object
-                    if (history_point.first.nil?)
-                      # find actual in DB that was created before history
-                      obj = nil
-                      begin
-                        obj = target_klass.find(self.send(target_key))
-                      rescue
-                      end
-                      obj
-                    else
-                      if history_point.first.action.eql?('destroy')
-                        nil
-                      else
-                        history_point.first.created_at = original_history.created_at if original_history.created_at.present?
-                        (history_point.first.trackable_from_hash || history_point.first.trackable_root_from_hash) # restore
-                      end
-                    end
+                  if cached_obj.present?
+                    cached_obj
                   else
-                    # filter out duplicate doc_ids
-                    seen_ids = []
-                    history_point = history_point.to_a.reject do |history|
-                      if history.action.eql?('destroy')
-                        true
-                        seen_ids << history.doc_hash["_id"]
+
+                    history_point = target_klass.most_recent_history(target_created_at, scope)
+
+                    # resolve
+                    if restore_data[:type].eql?(:one) || restore_data[:type].eql?(:embedded)
+
+                      # couldn't find a history object
+                      if (history_point.first.nil?)
+                        # find actual in DB that was created before history
+                        target_klass.find(self.send(target_key)) rescue nil
                       else
-                        if seen_ids.include?(history.doc_hash["_id"])
-                          true
+                        if history_point.first.action.eql?('destroy')
+                          nil
                         else
+                          history_point.first.created_at = original_history.created_at if original_history.created_at.present?
+                          obj = (history_point.first.trackable_from_hash(cache_chain) || history_point.first.trackable_root_from_hash(cache_chain)) # restore
+
+                          cache_chain[obj.id.to_s] = obj
+                          obj
+                        end
+                      end
+                    else
+                      # filter out duplicate doc_ids
+                      seen_ids = []
+                      history_point = history_point.to_a.reject do |history|
+                        if history.action.eql?('destroy')
+                          true
                           seen_ids << history.doc_hash["_id"]
-                          false
-                        end
-                      end
-                    end
-                    hydrates = history_point.map do |h|
-                      h.created_at = original_history.created_at if original_history.created_at.present?
-                      (h.trackable_from_hash || h.trackable_root_from_hash)
-                    end # restore for many relation
-                    if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
-                      hydrates.sort! do |a,b|
-                        begin
-                          if restore_data[:order_by_op].eql?(:asc)
-                            a.send(restore_data[:order_by_key].to_sym) <=> b.send(restore_data[:order_by_key].to_sym)
+                        else
+                          if seen_ids.include?(history.doc_hash["_id"])
+                            true
                           else
-                            b.send(restore_data[:order_by_key].to_sym) <=> a.send(restore_data[:order_by_key].to_sym)
+                            seen_ids << history.doc_hash["_id"]
+                            false
                           end
-                        rescue
-                          0
                         end
                       end
+                      hydrates = history_point.map do |h|
+                        h.created_at = original_history.created_at if original_history.created_at.present?
+                        obj = (h.trackable_from_hash(cache_chain) || h.trackable_root_from_hash(cache_chain))
+
+                        cache_chain[obj.id.to_s] = obj
+                        obj
+                      end # restore for many relation
+                      if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
+                        hydrates.sort! do |a,b|
+                          begin
+                            if restore_data[:order_by_op].eql?(:asc)
+                              a.send(restore_data[:order_by_key].to_sym) <=> b.send(restore_data[:order_by_key].to_sym)
+                            else
+                              b.send(restore_data[:order_by_key].to_sym) <=> a.send(restore_data[:order_by_key].to_sym)
+                            end
+                          rescue
+                            0
+                          end
+                        end
+                      end
+
+                      hydrates
+
                     end
-
-                    hydrates
-
                   end
                 end
               end
