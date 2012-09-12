@@ -60,7 +60,14 @@ module Mongoid::History
                   ret = {:target => obj, :target_class => hash_data.class_name.constantize, 
                           :type => Mongoid::History::Trackable::Helpers.determine_relation_type(hash_data.relation),
                           :foreign_key => (hash_data.relation.eql?(Mongoid::Relations::Referenced::ManyToMany) ? hash_data.key : hash_data.as)}
-                  unless hash_data.order.nil?
+                  if hash_data.order.nil?
+                    # ask the class itself
+                    scoping_opts = hash_data.class_name.constantize.default_scoping
+                    if scoping_opts.is_a?(Hash) && scoping_opts[:order_by].is_a?(Array) && scoping_opts[:order_by][0].is_a?(Array)
+                      ret[:order_by_key] = scoping_opts[:order_by][0][0]
+                      ret[:order_by_op] = scoping_opts[:order_by][0][1]
+                    end
+                  else
                     if hash_data.order.is_a?(Mongoid::Criterion::Complex)
                       ret[:order_by_key] = hash_data.order.key
                       ret[:order_by_op] = hash_data.order.operator.to_sym
