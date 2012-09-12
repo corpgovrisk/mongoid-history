@@ -216,11 +216,24 @@ module Mongoid::History
 
             if (restore_data[:target] != nil && target_klass != nil)
               # if the document hash stored an old embedded version then use that
-              if original_history != nil && original_history.doc_hash[restore_data[:target].to_s] != nil
+
+              embedded_document = nil
+              if (original_history != nil)
+
+                if original_history.doc_hash.is_a?(Hash) && original_history.doc_hash[restore_data[:target].to_s] != nil
+                  embedded_document = original_history.doc_hash[restore_data[:target].to_s]
+                elsif original_history.root_hash.is_a?(Hash) && original_history.root_hash[restore_data[:target].to_s] != nil
+                  embedded_document = original_history.root_hash[restore_data[:target].to_s]
+                end
+
+              end
+
+              # check if the embedded hash is available
+              if embedded_document != nil
                 self.metaclass.send(:define_method, restore_data[:target].to_s) do
                   # wakeup
-                  if original_history.doc_hash[restore_data[:target].to_s].is_a?(Array)
-                    hydrates = original_history.doc_hash[restore_data[:target].to_s].map do |hash_obj|
+                  if embedded_document.is_a?(Array)
+                    hydrates = embedded_document.map do |hash_obj|
 
                       # check if we have a cached in the history chain
                       if cache_chain[hash_obj["_id"].to_s].present?
@@ -253,7 +266,7 @@ module Mongoid::History
 
                     hydrates
                   else
-                    hash_obj = original_history.doc_hash[restore_data[:target].to_s]
+                    hash_obj = embedded_document
                     if cache_chain[hash_obj["_id"].to_s].present?
                       cache_chain[hash_obj["_id"].to_s]
                     else 
