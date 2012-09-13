@@ -84,12 +84,12 @@ module Mongoid::History
 
     ##
     # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
-    def trackable_root_from_hash
+    def trackable_root_from_hash(cache_chain = {})
       return unless root_name && root_hash
       @trackable_root_from_hash ||= 
         Mongoid::Factory.from_db(doc_name.classify.constantize, root_hash) rescue nil
       @trackable_root_from_hash["_history_id"] = self.id
-      @trackable_root_from_hash.hydrated_from_hash!(self) if !(defined?(@trackable_root_from_hash).nil?) &&  @trackable_root_from_hash.respond_to?(:hydrated_from_hash!)
+      @trackable_root_from_hash.hydrated_from_hash!(self, cache_chain) if !(defined?(@trackable_root_from_hash).nil?) &&  @trackable_root_from_hash.respond_to?(:hydrated_from_hash!)
       @trackable_root_from_hash
     end
     
@@ -102,13 +102,13 @@ module Mongoid::History
 
     ##
     # Note: This is a best effort method (a result is not guarenteed, and any failure returns nil (rescue nil))
-    def trackable_from_hash
+    def trackable_from_hash(cache_chain = {})
       return unless doc_name && doc_hash
       klass = doc_name.classify.constantize
       @trackable_from_hash ||=
         klass.instantiate(doc_hash) rescue nil
       @trackable_from_hash["_history_id"] = self.id
-      @trackable_from_hash.hydrated_from_hash!(self) if !(defined?(@trackable_from_hash).nil?) &&  @trackable_from_hash.respond_to?(:hydrated_from_hash!)
+      @trackable_from_hash.hydrated_from_hash!(self, cache_chain) if !(defined?(@trackable_from_hash).nil?) &&  @trackable_from_hash.respond_to?(:hydrated_from_hash!)
       @trackable_from_hash
     end
     
