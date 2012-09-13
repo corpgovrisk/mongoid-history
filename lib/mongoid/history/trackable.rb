@@ -338,7 +338,6 @@ module Mongoid::History
                       end
                     else
                       # filter out duplicate doc_ids
-                      Rails.logger.debug("Mongoid-history: #{restore_data[:target]} performing rejection")
                       seen_ids = []
                       history_point = history_point.to_a.reject do |history|
                         if history.action.eql?('destroy')
