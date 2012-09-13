@@ -299,7 +299,6 @@ module Mongoid::History
                   scope = {}
 
 
-
                   # scope history
                   if restore_data[:type].eql?(:many)
                     scope = {:"doc_hash.#{target_key}_id" => self.id}
@@ -339,6 +338,7 @@ module Mongoid::History
                       end
                     else
                       # filter out duplicate doc_ids
+                      Rails.logger.debug("Mongoid-history: #{restore_data[:target]} performing rejection")
                       seen_ids = []
                       history_point = history_point.to_a.reject do |history|
                         if history.action.eql?('destroy')
@@ -353,6 +353,7 @@ module Mongoid::History
                           end
                         end
                       end
+
                       hydrates = history_point.map do |h|
                         h.created_at = original_history.created_at if original_history.created_at.present?
                         obj = (h.trackable_from_hash(cache_chain) || h.trackable_root_from_hash(cache_chain))
@@ -360,6 +361,20 @@ module Mongoid::History
                         cache_chain[obj.id.to_s] = obj
                         obj
                       end # restore for many relation
+
+                      # there may potentially be children that exist but don't have any history, so let's try and find them
+                      # but exclude the ones we have already seen (destroyed, created, etc)
+                      base_criteria = target_klass.criteria.not_in(:_id => seen_ids)
+                      if restore_data[:type].eql?(:many)
+                        base_criteria = base_criteria.where(:"#{target_key}_id" => self.id)
+                      else
+                        base_criteria = base_criteria.where(:_id.in => self.send(target_key))
+                      end
+
+                      base_criteria.all.each do |obj|
+                        hydrates << obj
+                      end
+
                       if !(restore_data[:order_by_key].nil?) && hydrates.first.respond_to?(restore_data[:order_by_key].to_sym)
                         hydrates.sort! do |a,b|
                           begin
@@ -478,9 +493,15 @@ module Mongoid::History
       def history_tracker_attributes(method)
         return @history_tracker_attributes if @history_tracker_attributes
 
+        this_document = self.as_document
+        # find the relations which manage history on their own
+        external_relations = self.relations.select{|key, value| !(value.embedded?) && Mongoid::History.trackable_class_options[value.class_name.tableize.singularize.to_sym].present?}
+        this_document.reject!{|key, value| external_relations.include?(key)}
+
+
         @history_tracker_attributes = {
           :association_chain  => traverse_association_chain,
-          :doc_hash           => self.as_document,
+          :doc_hash           => this_document,
           :doc_name           => self.class.name,
           :is_embedded        => embedded?,
           :scope              => history_trackable_options[:scope],
