@@ -111,6 +111,8 @@ module Mongoid::History
       end
 
       def track_history?
+        return false if Mongoid::History.tracker_disabled.eql?(true)
+
         enabled = Thread.current[track_history_flag]
         enabled.nil? ? true : enabled
       end
@@ -226,7 +228,6 @@ module Mongoid::History
 
               embedded_document = nil
               if (original_history != nil)
-
                 if original_history.doc_hash.is_a?(Hash) && original_history.doc_hash[restore_data[:target].to_s] != nil
                   embedded_document = original_history.doc_hash[restore_data[:target].to_s]
                 elsif original_history.root_hash.is_a?(Hash) && original_history.root_hash[restore_data[:target].to_s] != nil
