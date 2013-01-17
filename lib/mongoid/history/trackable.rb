@@ -3,20 +3,20 @@ module Mongoid::History
 
     module ClassMethods
       def track_history(options={})
-        model_name = self.name.tableize.singularize.to_sym
+        scope_name = self.collection_name.to_s.singularize.to_sym
+
         default_options = {
-          :on             =>  :all,
-          :except         =>  [:created_at, :updated_at],
-          :modifier_field =>  :modifier,
-          :version_field  =>  :version,
-          :scope          =>  model_name,
-          :track_root     =>  true,
-          :fetch_related  =>  true,
-          :track_create   =>  true,
-          :track_update   =>  true,
-          :track_destroy  =>  true,
-          :trigger        =>  nil,
-        }
+                  :on             =>  :all,
+                  :except         =>  [:created_at, :updated_at],
+                  :modifier_field =>  :modifier,
+                  :version_field  =>  :version,
+                  :scope          =>  scope_name,
+                  :track_root     =>  true,
+                  :track_create   =>  false,
+                  :track_update   =>  true,
+                  :track_destroy  =>  false,
+                  :trigger        =>  nil,
+                }
 
         options = default_options.merge(options)
 
@@ -92,9 +92,13 @@ module Mongoid::History
         end
 
         field options[:version_field].to_sym, :type => Integer
-        belongs_to options[:modifier_field].to_sym, :class_name => Mongoid::History.modifier_class_name, inverse_of: nil
 
-        include InstanceMethods
+        belongs_to options[:modifier_field].to_sym, :class_name => Mongoid::History.modifier_class_name, inverse_of: nil
+        belongs_to_modifier_options = { :class_name => Mongoid::History.modifier_class_name }
+        belongs_to_modifier_options[:inverse_of] = options[:modifier_field_inverse_of] if options.has_key?(:modifier_field_inverse_of)
+        belongs_to options[:modifier_field].to_sym, belongs_to_modifier_options
+
+        include MyInstanceMethods
         extend SingletonMethods
 
         delegate :history_trackable_options, :to => 'self.class'
@@ -104,10 +108,8 @@ module Mongoid::History
         before_create :track_create if options[:track_create]
         before_destroy :track_destroy if options[:track_destroy]
 
-        Mongoid::History.trackable_classes ||= []
-        Mongoid::History.trackable_classes << self
         Mongoid::History.trackable_class_options ||= {}
-        Mongoid::History.trackable_class_options[model_name] = options
+        Mongoid::History.trackable_class_options[scope_name] = options
       end
 
       def track_history?
@@ -156,9 +158,9 @@ module Mongoid::History
       end
     end
 
-    module InstanceMethods
+    module MyInstanceMethods
       def history_tracks
-        @history_tracks ||= Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope], :association_chain => traverse_association_chain)
+        @history_tracks ||= Mongoid::History.tracker_class.where(:scope => history_trackable_options[:scope], :association_chain => association_hash)
       end
 
       def undo!(modifier, options_or_version=nil)
@@ -444,8 +446,25 @@ module Mongoid::History
 
       def traverse_association_chain(node=self)
         list = node._parent ? traverse_association_chain(node._parent) : []
-        list << { 'name' => node.class.name, 'id' => node.id }
+        list << association_hash(node)
         list
+      end
+
+      def association_hash(node=self)
+
+        # We prefer to look up associations through the parent record because
+        # we're assured, through the object creation, it'll exist. Whereas we're not guarenteed
+        # the child to parent (embedded_in, belongs_to) relation will be defined
+        if node._parent
+          meta = _parent.relations.values.select do |relation|
+            relation.class_name == node.class.to_s
+          end.first
+        end
+
+        # if root node has no meta, and should use class name instead
+        name = meta ? meta.key.to_s : node.class.name
+
+        ActiveSupport::OrderedHash['name', name, 'id', node.id]
       end
 
       def modified_attributes_for_update
@@ -566,9 +585,9 @@ module Mongoid::History
         return unless should_track_update?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
         self.send("#{history_trackable_options[:version_field]}=", current_version)
-        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:update).merge(:version => current_version, :action => "update"))
-        clear_memoization
 
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:update).merge(:version => current_version, :action => "update", :trackable => self))
+        clear_memoization
         notify_trigger history_obj
       end
 
@@ -576,18 +595,18 @@ module Mongoid::History
         return unless should_track_create?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
         self.send("#{history_trackable_options[:version_field]}=", current_version)
-        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:create).merge(:version => current_version, :action => "create"))
-        clear_memoization
 
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:create).merge(:version => current_version, :action => "create", :trackable => self))
+        clear_memoization
         notify_trigger history_obj
       end
 
       def track_destroy
         return unless track_history?
         current_version = (self.send(history_trackable_options[:version_field]) || 0 ) + 1
-        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:destroy).merge(:version => current_version, :action => "destroy"))
-        clear_memoization
 
+        history_obj = Mongoid::History.tracker_class.create!(history_tracker_attributes(:destroy).merge(:version => current_version, :action => "destroy", :trackable => self))
+        clear_memoization
         notify_trigger history_obj
       end
 
@@ -607,22 +626,22 @@ module Mongoid::History
         modified = {}
         changes.each_pair do |k, v|
           o, m = v
-          original[k] = o
-          modified[k] = m
+          original[k] = o unless o.nil?
+          modified[k] = m unless m.nil?
         end
-
-        return [original, modified]
+        [ original, modified ]
       end
+
 
       def notify_trigger(history_obj)
         chain = history_obj.nil? || history_obj.bubble_chain.nil? ? [] : history_obj.bubble_chain
 
         if history_trackable_options[:trigger].is_a?(Hash) && history_trackable_options[:trigger][:type] != nil
           case history_trackable_options[:trigger][:type]
-          when :method # developer has defined a special method that we should call
-            self.send(history_trackable_options[:trigger][:target], history_obj) if self.respond_to?(history_trackable_options[:trigger][:target])
-          when :relation # we have a relation that may support history tracking
-            target = self.send(history_trackable_options[:trigger][:target])
+            when :method # developer has defined a special method that we should call
+              self.send(history_trackable_options[:trigger][:target], history_obj) if self.respond_to?(history_trackable_options[:trigger][:target])
+            when :relation # we have a relation that may support history tracking
+              target = self.send(history_trackable_options[:trigger][:target])
             if (target.is_a?(Array)) # target is a many relation
               target.each do |obj|
                 obj.send(:_history_recorded_from_child, self, history_obj, chain) if obj.respond_to?(:_history_recorded_from_child)
@@ -633,14 +652,14 @@ module Mongoid::History
           end
         end
       end
-
     end
 
     module SingletonMethods
       def history_trackable_options
-        @history_trackable_options ||= Mongoid::History.trackable_class_options[self.name.tableize.singularize.to_sym]
+        @history_trackable_options ||= Mongoid::History.trackable_class_options[self.collection_name.to_s.singularize.to_sym]
       end
     end
+
 
     module Helpers
       def self.determine_relation_type(type)
@@ -660,12 +679,13 @@ module Mongoid::History
     end
 
 
-    include InstanceMethods
+    #include InstanceMethods
     extend ClassMethods
 
     def self.included(base)
       base.extend(ClassMethods)
     end
+
 
   end
 end

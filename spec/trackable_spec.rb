@@ -8,19 +8,8 @@ describe Mongoid::History::Trackable do
     end
   end
 
-  after :each do
-    Mongoid::History.trackable_classes = nil
-    Mongoid::History.trackable_class_options = nil
-  end
-
   it "should have #track_history" do
     MyModel.should respond_to :track_history
-  end
-
-  it "should append trackable_classes ONLY when #track_history is called" do
-    Mongoid::History.trackable_classes.should be_blank
-    MyModel.track_history
-    Mongoid::History.trackable_classes.should == [MyModel]
   end
 
   it "should append trackable_class_options ONLY when #track_history is called" do
@@ -39,19 +28,16 @@ describe Mongoid::History::Trackable do
 
       @expected_option = {
         :on             =>  :all,
+        :except         =>  [:created_at, :updated_at],
         :modifier_field =>  :modifier,
         :version_field  =>  :version,
-        :scope          =>  :my_model,
-        :except         =>  ["created_at", "updated_at", "version", "modifier_id", "_id", "id"],
+        :scope          =>  scope_name,
+        :track_root     =>  true,
         :track_create   =>  false,
         :track_update   =>  true,
         :track_destroy  =>  false,
+        :trigger        =>  nil,
       }
-    end
-
-    after :each do
-      Mongoid::History.trackable_classes = nil
-      Mongoid::History.trackable_class_options = nil
     end
 
     it "should have default options" do
@@ -72,6 +58,21 @@ describe Mongoid::History::Trackable do
 
     it "should define #history_trackable_options" do
       MyModel.history_trackable_options.should == @expected_option
+    end
+
+    context "sub-model" do
+      before :each do
+        class MySubModel < MyModel
+        end
+      end
+
+      it "should have default options" do
+        Mongoid::History.trackable_class_options[:my_model].should == @expected_option
+      end
+
+      it "should define #history_trackable_options" do
+        MySubModel.history_trackable_options.should == @expected_option
+      end
     end
 
     context "track_history" do

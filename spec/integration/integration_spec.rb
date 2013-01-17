@@ -1,11 +1,7 @@
-require File.expand_path(File.dirname(__FILE__) + '/../spec_helper')
+require 'spec_helper'
 
 describe Mongoid::History do
-  before :all do
-    class HistoryTracker
-      include Mongoid::History::Tracker
-    end
-
+  before :each do
     class Post
       include Mongoid::Document
       include Mongoid::Timestamps
@@ -16,6 +12,11 @@ describe Mongoid::History do
       field           :rating
 
       embeds_many     :comments
+      embeds_one      :section
+      embeds_many     :tags
+
+      accepts_nested_attributes_for :tags, :allow_destroy => true
+
       track_history   :on => [:title, :body], :track_destroy => true
     end
 
@@ -26,8 +27,18 @@ describe Mongoid::History do
 
       field             :title
       field             :body
-      embedded_in       :post, :inverse_of => :comments
-      track_history     :on => [:title, :body], :scope => :post, :track_create => true
+      embedded_in       :post
+      track_history     :on => [:title, :body], :scope => :post, :track_create => true, :track_destroy => true
+    end
+
+    class Section
+      include Mongoid::Document
+      include Mongoid::Timestamps
+      include Mongoid::History::Trackable
+
+      field             :title
+      embedded_in       :post
+      track_history     :on => [:title], :scope => :post, :track_create => true, :track_destroy => true
     end
 
     class User
@@ -37,12 +48,22 @@ describe Mongoid::History do
 
       field             :email
       field             :name
+      field             :aliases, :type => Array
       track_history     :except => [:email]
     end
-  end
 
-  before :each do
-    @user = User.create(:name => "Aaron", :email => "aaron@randomemail.com")
+    class Tag
+      include Mongoid::Document
+      include Mongoid::Timestamps
+      include Mongoid::History::Trackable
+
+      belongs_to :updated_by, :class_name => "User"
+
+      field             :title
+      track_history     :on => [:title], :scope => :post, :track_create => true, :track_destroy => true, :modifier_field => :updated_by
+    end
+
+    @user = User.create(:name => "Aaron", :email => "aaron@randomemail.com", :aliases => [ 'bob' ])
     @another_user = User.create(:name => "Another Guy", :email => "anotherguy@randomemail.com")
     @post = Post.create(:title => "Test", :body => "Post", :modifier => @user, :views => 100)
     @comment = @post.comments.create(:title => "test", :body => "comment", :modifier => @user)
@@ -79,7 +100,11 @@ describe Mongoid::History do
       end
 
       it "should assign association_chain" do
-        @comment.history_tracks.first.association_chain.should == [{'id' => @post.id, 'name' => "Post"}, {'id' => @comment.id, 'name' => "Comment"}]
+        expected = [
+          {'id' => @post.id, 'name' => "Post"},
+          {'id' => @comment.id, 'name' => "comments"}
+        ]
+        @comment.history_tracks.first.association_chain.should == expected
       end
     end
 
@@ -87,7 +112,7 @@ describe Mongoid::History do
       it "should have two history track records in post" do
         lambda {
           @post.destroy
-        }.should change(HistoryTracker, :count).by(1)
+        }.should change(Tracker, :count).by(1)
       end
 
       it "should assign destroy on track record" do
@@ -99,37 +124,36 @@ describe Mongoid::History do
         @post.destroy
         @post.history_tracks.last.affected["title"].should == "Test"
       end
-
     end
 
     describe "on update non-embedded" do
       it "should create a history track if changed attributes match tracked attributes" do
         lambda {
           @post.update_attributes(:title => "Another Test")
-        }.should change(HistoryTracker, :count).by(1)
+        }.should change(Tracker, :count).by(1)
       end
 
       it "should not create a history track if changed attributes do not match tracked attributes" do
         lambda {
           @post.update_attributes(:rating => "untracked")
-        }.should change(HistoryTracker, :count).by(0)
+        }.should change(Tracker, :count).by(0)
       end
 
       it "should assign modified fields" do
         @post.update_attributes(:title => "Another Test")
-        @post.history_tracks.first.modified.should == {
+        @post.history_tracks.last.modified.should == {
           "title" => "Another Test"
         }
       end
 
       it "should assign method field" do
         @post.update_attributes(:title => "Another Test")
-        @post.history_tracks.first.action.should == "update"
+        @post.history_tracks.last.action.should == "update"
       end
 
       it "should assign original fields" do
         @post.update_attributes(:title => "Another Test")
-        @post.history_tracks.first.original.should == {
+        @post.history_tracks.last.original.should == {
           "title" => "Test"
         }
       end
@@ -156,15 +180,39 @@ describe Mongoid::History do
 
       it "should assign association_chain" do
         @post.update_attributes(:title => "Another Test")
-        @post.history_tracks.first.association_chain.should == [{'id' => @post.id, 'name' => "Post"}]
+        @post.history_tracks.last.association_chain.should == [{'id' => @post.id, 'name' => "Post"}]
       end
 
       it "should exclude defined options" do
+        name = @user.name
         @user.update_attributes(:name => "Aaron2", :email => "aaronsnewemail@randomemail.com")
-        @user.history_tracks.first.modified.should == {
-            "name" => "Aaron2"
-        }
+        @user.history_tracks.first.original.keys.should == [ "name", "updated_at" ]
+        @user.history_tracks.first.original["name"].should == name
+        @user.history_tracks.first.modified.keys.should == [ "name", "updated_at" ]
+        @user.history_tracks.first.modified["name"].should == @user.name
       end
+
+      it "should undo field changes" do
+        name = @user.name
+        @user.update_attributes(:name => "Aaron2", :email => "aaronsnewemail@randomemail.com")
+        @user.history_tracks.first.undo! nil
+        @user.reload.name.should == name
+      end
+
+      it "should track array changes" do
+        aliases = @user.aliases
+        @user.update_attributes(:aliases => [ 'bob', 'joe' ])
+        @user.history_tracks.first.original["aliases"].should == aliases
+        @user.history_tracks.first.modified["aliases"].should == @user.aliases
+      end
+
+      it "should undo array changes" do
+        aliases = @user.aliases
+        @user.update_attributes(:aliases => [ 'bob', 'joe' ])
+        @user.history_tracks.first.undo! nil
+        @user.reload.aliases.should == aliases
+      end
+
     end
 
     describe "on update non-embedded twice" do
@@ -178,7 +226,7 @@ describe Mongoid::History do
         lambda {
           @post.update_attributes(:title => "Test2")
           @post.update_attributes(:title => "Test3")
-        }.should change(HistoryTracker, :count).by(2)
+        }.should change(Tracker, :count).by(2)
       end
 
       it "should create a history track of version 2" do
@@ -206,11 +254,11 @@ describe Mongoid::History do
 
       it "should assign modifier" do
         @post.update_attributes(:title => "Another Test", :modifier => @another_user)
-        @post.history_tracks.first.modifier.should == @another_user
+        @post.history_tracks.last.modifier.should == @another_user
       end
     end
 
-    describe "on update embedded" do
+    describe "on update embedded 1..N (embeds_many)" do
       it "should assign version on comment" do
         @comment.update_attributes(:title => "Test2")
         @comment.version.should == 2 # first track generated on creation
@@ -235,43 +283,177 @@ describe Mongoid::History do
         }
       end
 
+      it "should be possible to undo from parent" do
+        @comment.update_attributes(:title => "Test 2")
+        @post.history_tracks.last.undo!(@user)
+        @comment.reload
+        @comment.title.should == "test"
+      end
+
       it "should assign modifier" do
         @post.update_attributes(:title => "Another Test", :modifier => @another_user)
-        @post.history_tracks.first.modifier.should == @another_user
+        @post.history_tracks.last.modifier.should == @another_user
+      end
+    end
+
+    describe "on update embedded 1..1 (embeds_one)" do
+      before(:each) do
+        @section = Section.new(:title => 'Technology')
+        @post.section = @section
+        @post.save!
+        @post.reload
+        @section = @post.section
+      end
+
+      it "should assign version on create section" do
+        @section.version.should == 1
+      end
+
+      it "should assign version on section" do
+        @section.update_attributes(:title => 'Technology 2')
+        @section.version.should == 2 # first track generated on creation
+      end
+
+      it "should create a history track of version 2" do
+        @section.update_attributes(:title => 'Technology 2')
+        @section.history_tracks.where(:version => 2).first.should_not be_nil
+      end
+
+      it "should assign modified fields" do
+        @section.update_attributes(:title => 'Technology 2')
+        @section.history_tracks.where(:version => 2).first.modified.should == {
+          "title" => "Technology 2"
+        }
+      end
+
+      it "should assign original fields" do
+        @section.update_attributes(:title => 'Technology 2')
+        @section.history_tracks.where(:version => 2).first.original.should == {
+          "title" => "Technology"
+        }
+      end
+
+      it "should be possible to undo from parent" do
+        @section.update_attributes(:title => 'Technology 2')
+        @post.history_tracks.last.undo!(@user)
+        @section.reload
+        @section.title.should == "Technology"
+      end
+
+      it "should assign modifier" do
+        @section.update_attributes(:title => "Business", :modifier => @another_user)
+        @post.history_tracks.last.modifier.should == @another_user
+      end
+    end
+
+    describe "on destroy embedded" do
+      it "should be possible to re-create destroyed embedded" do
+        @comment.destroy
+        @comment.history_tracks.last.undo!(@user)
+        @post.reload
+        @post.comments.first.title.should == "test"
+      end
+
+      it "should be possible to re-create destroyed embedded from parent" do
+        @comment.destroy
+        @post.history_tracks.last.undo!(@user)
+        @post.reload
+        @post.comments.first.title.should == "test"
+      end
+
+      it "should be possible to destroy after re-create embedded from parent" do
+        @comment.destroy
+        @post.history_tracks.last.undo!(@user)
+        @post.history_tracks.last.undo!(@user)
+        @post.reload
+        @post.comments.count.should == 0
+      end
+
+      it "should be possible to create with redo after undo create embedded from parent" do
+        @post.comments.create!(:title => "The second one")
+        @track = @post.history_tracks.last
+        @track.undo!(@user)
+        @track.redo!(@user)
+        @post.reload
+        @post.comments.count.should == 2
+      end
+    end
+
+    describe "embedded with cascading callbacks" do
+      before(:each) do
+        Mongoid.instantiate_observers
+        Thread.current[:mongoid_history_sweeper_controller] = self
+        self.stub!(:current_user).and_return @user
+        @tag_foo = @post.tags.create(:title => "foo", :updated_by => @user)
+        @tag_bar = @post.tags.create(:title => "bar")
+      end
+
+      it "should have cascaded the creation callbacks and set timestamps" do
+        @tag_foo.created_at.should_not be_nil
+        @tag_foo.updated_at.should_not be_nil
+      end
+
+      it "should allow an update through the parent model" do
+        update_hash = { "post" => { "tags_attributes" => { "1234" => { "id" => @tag_bar.id, "title" => "baz" } } } }
+        @post.update_attributes(update_hash["post"])
+        @post.tags.last.title.should == "baz"
+      end
+
+      it "should be possible to destroy through parent model using canoncial _destroy macro" do
+        @post.tags.count.should == 2
+        update_hash = { "post" => { "tags_attributes" => { "1234" => { "id" => @tag_bar.id, "title" => "baz", "_destroy" => "true"} } } }
+        @post.update_attributes(update_hash["post"])
+        @post.tags.count.should == 1
+        @post.history_tracks.last.action.should == "destroy"
+      end
+
+      it "should write relationship name for association_chain hiearchy instead of class name when using _destroy macro" do
+        update_hash = {"tags_attributes" => { "1234" => { "id" => @tag_foo.id, "_destroy" => "1"} } }
+        @post.update_attributes(update_hash)
+
+        # historically this would have evaluated to 'Tags' and an error would be thrown
+        # on any call that walked up the association_chain, e.g. 'trackable'
+        @tag_foo.history_tracks.last.association_chain.last["name"].should == "tags"
+        lambda{ @tag_foo.history_tracks.last.trackable }.should_not raise_error
+      end
+
+      it "should save modifier" do
+        @tag_foo.history_tracks.last.modifier.should eq @user
+        @tag_bar.history_tracks.last.modifier.should eq @user
       end
     end
 
     describe "non-embedded" do
       it "should undo changes" do
         @post.update_attributes(:title => "Test2")
-        @post.history_tracks.where(:version => 1).first.undo!(@user)
+        @post.history_tracks.where(:version => 1).last.undo!(@user)
         @post.reload
         @post.title.should == "Test"
       end
 
       it "should undo destruction" do
         @post.destroy
-        @post.history_tracks.where(:version => 1).first.undo!(@user)
+        @post.history_tracks.where(:version => 1).last.undo!(@user)
         Post.find(@post.id).title.should == "Test"
       end
 
       it "should create a new history track after undo" do
         @post.update_attributes(:title => "Test2")
-        @post.history_tracks.where(:version => 1).first.undo!(@user)
+        @post.history_tracks.last.undo!(@user)
         @post.reload
-        @post.history_tracks.count.should == 2
+        @post.history_tracks.count.should == 3
       end
 
       it "should assign @user as the modifier of the newly created history track" do
         @post.update_attributes(:title => "Test2")
-        @post.history_tracks.where(:version => 1).first.undo!(@user)
+        @post.history_tracks.where(:version => 1).last.undo!(@user)
         @post.reload
-        @post.history_tracks.where(:version => 2).first.modifier.should == @user
+        @post.history_tracks.where(:version => 2).last.modifier.should == @user
       end
 
       it "should stay the same after undo and redo" do
         @post.update_attributes(:title => "Test2")
-        @track = @post.history_tracks.where(:version => 1).first
+        @track = @post.history_tracks.last
         @track.undo!(@user)
         @track.redo!(@user)
         @post2 = Post.where(:_id => @post.id).first
@@ -281,7 +463,7 @@ describe Mongoid::History do
 
       it "should be destroyed after undo and redo" do
         @post.destroy
-        @track = @post.history_tracks.where(:version => 1).first
+        @track = @post.history_tracks.where(:version => 1).last
         @track.undo!(@user)
         @track.redo!(@user)
         Post.where(:_id => @post.id).first.should == nil
